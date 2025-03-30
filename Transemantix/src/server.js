@@ -4,111 +4,70 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
 import express from "express";
 import fs from "fs";
+import OpenAI from "openai";
+import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
 
-// 中文常见编程词汇到英文的映射
-const commonMappings = {
-  // 数据类型
-  字符串: "string",
-  数字: "number",
-  整数: "integer",
-  浮点数: "float",
-  布尔: "boolean",
-  数组: "array",
-  对象: "object",
-  空: "null",
-  未定义: "undefined",
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-  // 常见变量名
-  用户: "user",
-  名称: "name",
-  标题: "title",
-  描述: "description",
-  列表: "list",
-  索引: "index",
-  计数: "count",
-  值: "value",
-  项目: "item",
-  配置: "config",
-  设置: "settings",
-  选项: "options",
-  数据: "data",
-  结果: "result",
-  状态: "status",
-  错误: "error",
-  警告: "warning",
-  成功: "success",
-  消息: "message",
+// 加载环境变量
+dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
-  // 常见函数动词
-  获取: "get",
-  设置: "set",
-  创建: "create",
-  删除: "delete",
-  更新: "update",
-  添加: "add",
-  移除: "remove",
-  查找: "find",
-  搜索: "search",
-  过滤: "filter",
-  排序: "sort",
-};
+console.log("当前目录:", __dirname);
+console.log("环境变量状态:", {
+  DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY ? "已设置" : "未设置",
+  API_KEY_LENGTH: process.env.DEEPSEEK_API_KEY
+    ? process.env.DEEPSEEK_API_KEY.length
+    : 0,
+});
 
-// 将中文短语转换为驼峰命名法
-function translateToCamelCase(phrase) {
-  const segments = phrase.split(/[\s,.，。、；;：:\s]+/).filter(Boolean);
-  return segments
-    .map((segment, index) => {
-      const translated = commonMappings[segment] || segment;
-      if (index === 0) {
-        return translated.toLowerCase();
-      }
-      return (
-        translated.charAt(0).toUpperCase() + translated.slice(1).toLowerCase()
-      );
-    })
-    .join("");
-}
+// 初始化 DeepSeek 客户端 (使用与 OpenAI 兼容的 SDK)
+const deepseek = new OpenAI({
+  apiKey: process.env.DEEPSEEK_API_KEY,
+  baseURL: "https://api.deepseek.com",
+});
 
-// 将中文短语转换为帕斯卡命名法
-function translateToPascalCase(phrase) {
-  const segments = phrase.split(/[\s,.，。、；;：:\s]+/).filter(Boolean);
-  return segments
-    .map((segment) => {
-      const translated = commonMappings[segment] || segment;
-      return (
-        translated.charAt(0).toUpperCase() + translated.slice(1).toLowerCase()
-      );
-    })
-    .join("");
-}
+async function translateWithDeepSeek(chineseText, style) {
+  try {
+    console.log(`开始翻译: ${chineseText}, 样式: ${style}`);
 
-// 将中文短语转换为下划线命名法
-function translateToSnakeCase(phrase) {
-  const segments = phrase.split(/[\s,.，。、；;：:\s]+/).filter(Boolean);
-  return segments
-    .map((segment) => {
-      const translated = commonMappings[segment] || segment;
-      return translated.toLowerCase();
-    })
-    .join("_");
-}
+    const prompt = `请将以下中文文本翻译成适合编程使用的英文命名：${chineseText}
+要求：
+1. 翻译要准确表达原意
+2. 使用专业的编程术语
+3. 返回格式为 ${style}
+4. 只返回翻译结果，不要其他解释`;
 
-// 将中文短语转换为烤串命名法
-function translateToKebabCase(phrase) {
-  const segments = phrase.split(/[\s,.，。、；;：:\s]+/).filter(Boolean);
-  return segments
-    .map((segment) => {
-      const translated = commonMappings[segment] || segment;
-      return translated.toLowerCase();
-    })
-    .join("-");
+    const response = await deepseek.chat.completions.create({
+      model: "deepseek-chat",
+      messages: [
+        {
+          role: "system",
+          content:
+            "你是一个专业的编程命名翻译助手。请直接返回翻译结果，不要添加任何解释。",
+        },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.3,
+      max_tokens: 100,
+    });
+
+    const result = response.choices[0].message.content.trim();
+    console.log(`翻译结果: ${result}`);
+    return result;
+  } catch (error) {
+    console.error("DeepSeek API 调用失败:", error);
+    throw new Error(`翻译服务暂时不可用: ${error.message}`);
+  }
 }
 
 // 创建服务器
 const server = new McpServer({
   name: "transemantix",
   version: "1.0.0",
-  description: "汉语翻译为符合语义化的英文命名工具",
+  description: "基于 DeepSeek 的中英文编程命名翻译工具",
 });
 
 // 定义翻译工具
@@ -122,32 +81,26 @@ server.tool(
       .describe("命名风格"),
   },
   async ({ input, style }) => {
-    let result;
-
     try {
-      switch (style) {
-        case "camelCase":
-          result = translateToCamelCase(input);
-          break;
-        case "PascalCase":
-          result = translateToPascalCase(input);
-          break;
-        case "snake_case":
-          result = translateToSnakeCase(input);
-          break;
-        case "kebab-case":
-          result = translateToKebabCase(input);
-          break;
-        default:
-          result = translateToCamelCase(input);
-      }
-
+      const result = await translateWithDeepSeek(input, style);
+      console.log("翻译完成，结果:", result);
       return {
-        content: [{ type: "text", text: result }],
+        content: [
+          {
+            type: "text",
+            text: result,
+          },
+        ],
       };
     } catch (error) {
+      console.error("翻译错误:", error);
       return {
-        content: [{ type: "text", text: `翻译失败: ${error.message}` }],
+        content: [
+          {
+            type: "text",
+            text: `翻译失败: ${error.message}`,
+          },
+        ],
         isError: true,
       };
     }
@@ -166,28 +119,12 @@ server.tool(
   },
   async ({ inputs, style }) => {
     try {
-      const results = inputs.map((input) => {
-        let translated;
-
-        switch (style) {
-          case "camelCase":
-            translated = translateToCamelCase(input);
-            break;
-          case "PascalCase":
-            translated = translateToPascalCase(input);
-            break;
-          case "snake_case":
-            translated = translateToSnakeCase(input);
-            break;
-          case "kebab-case":
-            translated = translateToKebabCase(input);
-            break;
-          default:
-            translated = translateToCamelCase(input);
-        }
-
-        return { original: input, translated };
-      });
+      const results = await Promise.all(
+        inputs.map(async (input) => {
+          const translated = await translateWithDeepSeek(input, style);
+          return { original: input, translated };
+        })
+      );
 
       return {
         content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
