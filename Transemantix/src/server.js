@@ -79,19 +79,48 @@ server.tool(
       .enum(["camelCase", "PascalCase", "snake_case", "kebab-case"])
       .default("camelCase")
       .describe("命名风格"),
+    returnMultipleStyles: z
+      .boolean()
+      .default(true)
+      .describe("是否返回多种风格（camelCase和PascalCase）"),
   },
-  async ({ input, style }) => {
+  async ({ input, style, returnMultipleStyles }) => {
     try {
-      const result = await translateWithDeepSeek(input, style);
-      console.log("翻译完成，结果:", result);
-      return {
-        content: [
-          {
-            type: "text",
-            text: result,
-          },
-        ],
-      };
+      let result;
+
+      // 如果需要返回多种风格
+      if (returnMultipleStyles) {
+        const camelResult = await translateWithDeepSeek(input, "camelCase");
+        const pascalResult = await translateWithDeepSeek(input, "PascalCase");
+
+        result = {
+          camelCase: camelResult,
+          PascalCase: pascalResult,
+          selected: style === "camelCase" ? camelResult : pascalResult,
+        };
+
+        console.log("翻译完成，结果:", result);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } else {
+        // 原有逻辑
+        result = await translateWithDeepSeek(input, style);
+        console.log("翻译完成，结果:", result);
+        return {
+          content: [
+            {
+              type: "text",
+              text: result,
+            },
+          ],
+        };
+      }
     } catch (error) {
       console.error("翻译错误:", error);
       return {
@@ -116,15 +145,42 @@ server.tool(
       .enum(["camelCase", "PascalCase", "snake_case", "kebab-case"])
       .default("camelCase")
       .describe("命名风格"),
+    returnMultipleStyles: z
+      .boolean()
+      .default(true)
+      .describe("是否返回多种风格（camelCase和PascalCase）"),
   },
-  async ({ inputs, style }) => {
+  async ({ inputs, style, returnMultipleStyles }) => {
     try {
-      const results = await Promise.all(
-        inputs.map(async (input) => {
-          const translated = await translateWithDeepSeek(input, style);
-          return { original: input, translated };
-        })
-      );
+      let results;
+
+      // 如果需要返回多种风格
+      if (returnMultipleStyles) {
+        results = await Promise.all(
+          inputs.map(async (input) => {
+            const camelResult = await translateWithDeepSeek(input, "camelCase");
+            const pascalResult = await translateWithDeepSeek(
+              input,
+              "PascalCase"
+            );
+
+            return {
+              original: input,
+              camelCase: camelResult,
+              PascalCase: pascalResult,
+              selected: style === "camelCase" ? camelResult : pascalResult,
+            };
+          })
+        );
+      } else {
+        // 原有逻辑
+        results = await Promise.all(
+          inputs.map(async (input) => {
+            const translated = await translateWithDeepSeek(input, style);
+            return { original: input, translated };
+          })
+        );
+      }
 
       return {
         content: [{ type: "text", text: JSON.stringify(results, null, 2) }],

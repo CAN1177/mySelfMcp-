@@ -1,8 +1,5 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import { spawn } from "child_process";
 import readline from "readline";
+import fetch from "node-fetch";
 
 // 创建命令行交互界面
 const rl = readline.createInterface({
@@ -10,118 +7,69 @@ const rl = readline.createInterface({
   output: process.stdout,
 });
 
-// 创建MCP客户端
-async function createClient(transportType = "stdio") {
-  const client = new Client(
-    {
-      name: "transemantix-client",
-      version: "1.0.0",
-      description: "汉语翻译为符合语义化的英文命名工具客户端",
-    },
-    {
-      capabilities: {
-        tools: {},
-      },
+// 直接调用 DeepSeek API 进行翻译
+async function translateWithDeepSeek(chineseText, style) {
+  try {
+    console.log(`开始翻译: ${chineseText}, 样式: ${style}`);
+
+    // 这里应该使用您的 API 密钥，这里使用的是 .env 中的 DEEPSEEK_API_KEY
+    const apiKey =
+      process.env.DEEPSEEK_API_KEY || "sk-c2bfccd2df4e43efb055e25d33ee199d";
+
+    const prompt = `请将以下中文文本翻译成适合编程使用的英文命名：${chineseText}
+要求：
+1. 翻译要准确表达原意
+2. 使用专业的编程术语
+3. 返回格式为 ${style}
+4. 只返回翻译结果，不要其他解释`;
+
+    const response = await fetch(
+      "https://api.deepseek.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: "deepseek-chat",
+          messages: [
+            {
+              role: "system",
+              content:
+                "你是一个专业的编程命名翻译助手。请直接返回翻译结果，不要添加任何解释。",
+            },
+            { role: "user", content: prompt },
+          ],
+          temperature: 0.3,
+          max_tokens: 100,
+        }),
+      }
+    );
+
+    const data = await response.json();
+
+    if (data.error) {
+      throw new Error(`API 错误: ${data.error.message}`);
     }
-  );
 
-  let transport;
-
-  if (transportType === "http") {
-    // 使用HTTP传输
-    transport = new SSEClientTransport(
-      "http://localhost:3008/sse",
-      "http://localhost:3008/messages"
-    );
-  } else {
-    // 使用标准输入输出传输
-    const serverProcess = spawn("node", ["src/server.js"], {
-      stdio: ["pipe", "pipe", process.stderr],
-      env: { ...process.env },
-    });
-
-    transport = new StdioClientTransport(
-      serverProcess.stdin,
-      serverProcess.stdout
-    );
-
-    // 处理服务器进程终止
-    serverProcess.on("exit", (code) => {
-      console.log(`服务器进程已退出，退出码: ${code}`);
-      process.exit(code);
-    });
-  }
-
-  await client.connect(transport);
-  return client;
-}
-
-// 翻译中文为不同格式的英文
-async function translateToEnglish(client, chinesePhrase, style = "camelCase") {
-  try {
-    const result = await client.callTool({
-      name: "translate-to-english",
-      arguments: {
-        chinesePhrase,
-        style,
-      },
-    });
-
-    return result.content[0].text;
+    const result = data.choices[0].message.content.trim();
+    console.log(`翻译结果: ${result}`);
+    return result;
   } catch (error) {
-    console.error("翻译失败:", error);
-    return null;
-  }
-}
-
-// 批量翻译
-async function batchTranslate(client, chinesePhrases, style = "camelCase") {
-  try {
-    const result = await client.callTool({
-      name: "batch-translate",
-      arguments: {
-        chinesePhrases,
-        style,
-      },
-    });
-
-    return JSON.parse(result.content[0].text);
-  } catch (error) {
-    console.error("批量翻译失败:", error);
-    return null;
-  }
-}
-
-// 添加自定义映射
-async function addCustomMapping(client, chinese, english) {
-  try {
-    const result = await client.callTool({
-      name: "add-custom-mapping",
-      arguments: {
-        chinese,
-        english,
-      },
-    });
-
-    return result.content[0].text;
-  } catch (error) {
-    console.error("添加自定义映射失败:", error);
-    return null;
+    console.error("翻译 API 调用失败:", error);
+    throw new Error(`翻译服务暂时不可用: ${error.message}`);
   }
 }
 
 // 交互式命令行界面
 async function startInteractiveCLI() {
-  console.log("正在启动 Transemantix 客户端...");
-  const client = await createClient(process.env.CLIENT_TYPE || "stdio");
-  console.log("客户端已连接到服务器!");
   console.log("=== Transemantix - 汉语翻译为语义化英文命名工具 ===");
   console.log("可用命令:");
   console.log(
     "  translate <中文短语> [风格]  - 翻译单个短语 (风格: camelCase, PascalCase, snake_case, kebab-case)"
   );
   console.log("  batch <中文短语1>,<中文短语2>... [风格] - 批量翻译多个短语");
-  console.log("  add <中文> <英文> - 添加自定义映射");
   console.log("  exit - 退出程序");
   console.log("=================================================");
 
@@ -161,13 +109,18 @@ async function startInteractiveCLI() {
             actualStyle = "camelCase";
           }
 
-          const result = await translateToEnglish(
-            client,
-            chinesePhrase,
-            actualStyle
+          console.log(
+            `翻译中文短语: "${chinesePhrase}" 为 ${actualStyle} 风格`
           );
-          if (result) {
+
+          try {
+            const result = await translateWithDeepSeek(
+              chinesePhrase,
+              actualStyle
+            );
             console.log(`翻译结果 (${actualStyle}): ${result}`);
+          } catch (error) {
+            console.error(`翻译错误: ${error.message}`);
           }
         }
       } else if (command === "batch") {
@@ -194,32 +147,20 @@ async function startInteractiveCLI() {
           }
 
           const chinesePhrases = phrasesInput.split(",").map((p) => p.trim());
-          const results = await batchTranslate(
-            client,
-            chinesePhrases,
-            actualStyle
-          );
+          console.log(`批量翻译结果 (${actualStyle}):`);
 
-          if (results) {
-            console.log(`批量翻译结果 (${actualStyle}):`);
-            results.forEach((item) => {
-              console.log(`  ${item.original} -> ${item.translated}`);
-            });
-          }
-        }
-      } else if (command === "add") {
-        if (args.length < 3) {
-          console.log("用法: add <中文> <英文>");
-        } else {
-          const chinese = args[1];
-          const english = args[2];
-          const result = await addCustomMapping(client, chinese, english);
-          if (result) {
-            console.log(result);
+          try {
+            // 依次翻译每个短语
+            for (const phrase of chinesePhrases) {
+              const result = await translateWithDeepSeek(phrase, actualStyle);
+              console.log(`  ${phrase} -> ${result}`);
+            }
+          } catch (error) {
+            console.error(`批量翻译错误: ${error.message}`);
           }
         }
       } else {
-        console.log("未知命令。可用命令: translate, batch, add, exit");
+        console.log("未知命令。可用命令: translate, batch, exit");
       }
 
       promptUser();
