@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JavaScript错误示例</title>
+  </head>
+  <body>
+    <h1>JavaScript错误示例</h1>
+    <p>请打开浏览器控制台查看错误信息</p>
+
+    <script>
+      // 添加全局错误处理函数
+      window.onerror = function (message, source, lineno, colno, error) {
+        console.error("全局错误捕获:", message, "于", source, "行:", lineno);
+        return false; // 允许默认处理继续
+      };
+
+      // 故意制造一个JavaScript错误
+      try {
+        // 引用未定义的变量
+        console.log(undefinedVariable);
+      } catch (error) {
+        // 在控制台显示错误
+        console.error("捕获的错误:", error);
+      }
+
+      // 直接抛出一个未被捕获的错误
+      // 这将在控制台中显示为未处理的错误
+      const obj = null;
+      obj.someMethod(); // 这会导致"无法读取null的属性"错误
+    </script>
+  </body>
+</html>
