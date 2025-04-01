@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>错误捕获MCP扩展</title>
+    <style>
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        margin: 0;
+        padding: 0;
+        width: 380px;
+        background-color: #f5f5f5;
+        color: #333;
+      }
+
+      .header {
+        background-color: #4285f4;
+        color: white;
+        padding: 10px 15px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .header h1 {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 500;
+      }
+
+      .toggle-switch {
+        position: relative;
+        display: inline-block;
+        width: 40px;
+        height: 20px;
+      }
+
+      .toggle-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: #ccc;
+        transition: 0.4s;
+        border-radius: 20px;
+      }
+
+      .slider:before {
+        position: absolute;
+        content: "";
+        height: 16px;
+        width: 16px;
+        left: 2px;
+        bottom: 2px;
+        background-color: white;
+        transition: 0.4s;
+        border-radius: 50%;
+      }
+
+      input:checked + .slider {
+        background-color: #2196f3;
+      }
+
+      input:focus + .slider {
+        box-shadow: 0 0 1px #2196f3;
+      }
+
+      input:checked + .slider:before {
+        transform: translateX(20px);
+      }
+
+      .content {
+        padding: 15px;
+      }
+
+      .tab-container {
+        margin-bottom: 15px;
+      }
+
+      .tabs {
+        display: flex;
+        border-bottom: 1px solid #ccc;
+      }
+
+      .tab {
+        padding: 8px 15px;
+        cursor: pointer;
+        background-color: #f1f1f1;
+        border: 1px solid #ccc;
+        border-bottom: none;
+        margin-right: 5px;
+        border-top-left-radius: 4px;
+        border-top-right-radius: 4px;
+      }
+
+      .tab.active {
+        background-color: white;
+        border-bottom: 1px solid white;
+      }
+
+      .tab-content {
+        display: none;
+        padding: 10px;
+        border: 1px solid #ccc;
+        border-top: none;
+        background-color: white;
+      }
+
+      .tab-content.active {
+        display: block;
+      }
+
+      .error-list {
+        max-height: 300px;
+        overflow-y: auto;
+      }
+
+      .error-item {
+        margin-bottom: 10px;
+        padding: 10px;
+        background-color: #f9f9f9;
+        border-left: 3px solid #e74c3c;
+        cursor: pointer;
+      }
+
+      .error-item:hover {
+        background-color: #f0f0f0;
+      }
+
+      .error-message {
+        font-weight: bold;
+        color: #e74c3c;
+        margin-bottom: 5px;
+      }
+
+      .error-url {
+        font-size: 0.8em;
+        color: #777;
+      }
+
+      .error-time {
+        font-size: 0.8em;
+        color: #777;
+      }
+
+      .error-details {
+        background-color: white;
+        padding: 15px;
+        margin-top: 10px;
+      }
+
+      .error-stack {
+        font-family: monospace;
+        white-space: pre-wrap;
+        font-size: 0.8em;
+        padding: 10px;
+        background-color: #f5f5f5;
+        border: 1px solid #ddd;
+        max-height: 200px;
+        overflow-y: auto;
+      }
+
+      .button {
+        background-color: #4285f4;
+        color: white;
+        border: none;
+        padding: 8px 15px;
+        border-radius: 4px;
+        cursor: pointer;
+        margin-right: 5px;
+      }
+
+      .button:hover {
+        background-color: #3367d6;
+      }
+
+      .button.secondary {
+        background-color: #f1f1f1;
+        color: #333;
+        border: 1px solid #ccc;
+      }
+
+      .button.secondary:hover {
+        background-color: #e1e1e1;
+      }
+
+      .button-group {
+        display: flex;
+        justify-content: flex-start;
+        margin-top: 10px;
+      }
+
+      .form-group {
+        margin-bottom: 15px;
+      }
+
+      .form-group label {
+        display: block;
+        margin-bottom: 5px;
+      }
+
+      .form-group input[type="text"] {
+        width: 100%;
+        padding: 6px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+      }
+
+      .checkbox-group {
+        margin-bottom: 10px;
+      }
+
+      .checkbox-group label {
+        display: flex;
+        align-items: center;
+      }
+
+      .checkbox-group input[type="checkbox"] {
+        margin-right: 5px;
+      }
+
+      .loading {
+        text-align: center;
+        padding: 20px;
+      }
+
+      .error-analysis {
+        margin-top: 15px;
+        padding: 10px;
+        background-color: #fff;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+      }
+
+      .analysis-title {
+        font-weight: bold;
+        margin-bottom: 5px;
+      }
+
+      .suggestions {
+        font-family: monospace;
+        white-space: pre-wrap;
+        padding: 10px;
+        background-color: #f5f5f5;
+        border: 1px solid #ddd;
+      }
+
+      .no-errors {
+        padding: 20px;
+        text-align: center;
+        color: #777;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1>错误捕获MCP扩展</h1>
+      <label class="toggle-switch">
+        <input type="checkbox" id="enableToggle" checked />
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="content">
+      <div class="tab-container">
+        <div class="tabs">
+          <div class="tab active" data-tab="errors">错误列表</div>
+          <div class="tab" data-tab="settings">设置</div>
+          <div class="tab" data-tab="about">关于</div>
+        </div>
+
+        <div class="tab-content active" id="errors-tab">
+          <div id="loading-errors" class="loading">加载中...</div>
+          <div id="error-list" class="error-list" style="display: none"></div>
+          <div id="no-errors" class="no-errors" style="display: none">
+            没有捕获到错误
+          </div>
+
+          <div class="button-group">
+            <button id="refresh-errors" class="button">刷新</button>
+            <button id="clear-errors" class="button secondary">清除所有</button>
+          </div>
+
+          <div id="error-details" class="error-details" style="display: none">
+            <h3>错误详情</h3>
+            <div id="selected-error-info"></div>
+
+            <div
+              id="error-analysis"
+              class="error-analysis"
+              style="display: none"
+            >
+              <div class="analysis-title">修复建议</div>
+              <div id="error-suggestions" class="suggestions"></div>
+            </div>
+
+            <div class="button-group">
+              <button id="analyze-error" class="button">分析错误</button>
+              <button id="back-to-list" class="button secondary">
+                返回列表
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-content" id="settings-tab">
+          <form id="settings-form">
+            <div class="form-group">
+              <label for="serverUrl">MCP服务器URL</label>
+              <input type="text" id="serverUrl" value="http://localhost:3000" />
+            </div>
+
+            <div class="checkbox-group">
+              <label>
+                <input type="checkbox" id="captureGlobalErrors" checked />
+                捕获全局JavaScript错误
+              </label>
+            </div>
+
+            <div class="checkbox-group">
+              <label>
+                <input type="checkbox" id="capturePromiseRejections" checked />
+                捕获未处理的Promise拒绝
+              </label>
+            </div>
+
+            <div class="checkbox-group">
+              <label>
+                <input type="checkbox" id="captureConsoleErrors" checked />
+                捕获console.error调用
+              </label>
+            </div>
+
+            <div class="checkbox-group">
+              <label>
+                <input type="checkbox" id="notificationsEnabled" checked />
+                显示错误通知
+              </label>
+            </div>
+
+            <div class="button-group">
+              <button type="submit" class="button">保存设置</button>
+              <button
+                type="button"
+                id="reset-settings"
+                class="button secondary"
+              >
+                重置默认
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <div class="tab-content" id="about-tab">
+          <h3>错误捕获MCP扩展</h3>
+          <p>版本: 1.0</p>
+          <p>捕获页面JavaScript错误并通过MCP服务器提供智能修复建议。</p>
+
+          <h4>主要功能</h4>
+          <ul>
+            <li>捕获JavaScript错误和异常</li>
+            <li>捕获未处理的Promise拒绝</li>
+            <li>捕获console.error调用</li>
+            <li>通过MCP服务器提供修复建议</li>
+          </ul>
+
+          <h4>使用方法</h4>
+          <p>
+            1. 确保MCP服务器正在运行<br />
+            2. 在设置中配置服务器URL<br />
+            3. 启用扩展并浏览网页<br />
+            4. 当错误发生时，将在扩展中显示并提供修复建议
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
