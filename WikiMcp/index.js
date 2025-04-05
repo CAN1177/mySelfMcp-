@@ -9,6 +9,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import axios from "axios";
 import TurndownService from "turndown";
+import { JSDOM } from "jsdom";
 import dotenv from "dotenv";
 import fs from "fs";
 import readline from "readline";
@@ -16,11 +17,137 @@ import readline from "readline";
 // 加载环境变量
 dotenv.config();
 
-// 创建HTML到Markdown的转换器
+// 创建HTML到Markdown的转换器，使用完整的配置选项
 const turndownService = new TurndownService({
   headingStyle: "atx",
   codeBlockStyle: "fenced",
+  bulletListMarker: "-",
+  hr: "---",
+  emDelimiter: "_",
+  strongDelimiter: "**",
+  linkStyle: "inlined",
+  linkReferenceStyle: "full",
+  preformattedCode: true,
 });
+
+// 添加自定义规则，确保更多HTML元素能够被正确转换
+turndownService.addRule("strikethrough", {
+  filter: ["del", "s", "strike"],
+  replacement: (content) => `~~${content}~~`,
+});
+
+turndownService.addRule("underline", {
+  filter: ["u"],
+  replacement: (content) => `<u>${content}</u>`,
+});
+
+// 优化图片处理
+turndownService.addRule("image", {
+  filter: "img",
+  replacement: function (content, node) {
+    const alt = node.alt || "";
+    let src = node.getAttribute("src") || "";
+
+    // 处理相对路径
+    if (src && !src.startsWith("http") && !src.startsWith("data:")) {
+      // 保持原始路径，不做修改
+      logToFile(`保留相对图片路径: ${src}`);
+    }
+
+    const title = node.title || alt;
+    const titlePart = title ? ` "${title}"` : "";
+    return `![${alt}](${src}${titlePart})`;
+  },
+});
+
+// 改进表格处理
+turndownService.addRule("tableCells", {
+  filter: ["th", "td"],
+  replacement: function (content, node) {
+    const delimiter =
+      node.parentNode.parentNode.tagName === "THEAD" ? "---" : "   ";
+    return ` ${content.trim() || " "} |`;
+  },
+});
+
+turndownService.addRule("tableRow", {
+  filter: "tr",
+  replacement: function (content, node) {
+    let output = `|${content}\n`;
+
+    // 如果是表头行，添加分隔行
+    if (node.parentNode.tagName === "THEAD") {
+      const cellCount = node.children.length;
+      let separatorRow = "|";
+      for (let i = 0; i < cellCount; i++) {
+        separatorRow += " --- |";
+      }
+      output += separatorRow + "\n";
+    }
+
+    return output;
+  },
+});
+
+turndownService.addRule("table", {
+  filter: function (node) {
+    return node.nodeName === "TABLE";
+  },
+  replacement: function (content, node) {
+    // 如果表格没有thead，手动构建表头分隔符
+    if (!node.querySelector("thead") && node.querySelector("tr")) {
+      const firstRow = node.querySelector("tr");
+      const cellCount = firstRow.children.length;
+
+      if (cellCount > 0) {
+        let separator = "\n|";
+        for (let i = 0; i < cellCount; i++) {
+          separator += " --- |";
+        }
+        separator += "\n";
+
+        // 在第一行后添加分隔符
+        const firstRowIndex = content.indexOf("\n");
+        if (firstRowIndex !== -1) {
+          content =
+            content.substring(0, firstRowIndex) +
+            separator +
+            content.substring(firstRowIndex);
+        }
+      }
+    }
+
+    return "\n\n" + content + "\n\n";
+  },
+});
+
+// 处理列表
+turndownService.addRule("listItem", {
+  filter: "li",
+  replacement: function (content, node, options) {
+    content = content
+      .replace(/^\n+/, "") // 移除开头的换行
+      .replace(/\n+$/, "\n") // 确保只有一个结尾换行
+      .replace(/\n/gm, "\n    "); // 缩进内容
+
+    let prefix = options.bulletListMarker + " ";
+    let parent = node.parentNode;
+
+    if (parent.nodeName === "OL") {
+      const start = parent.getAttribute("start");
+      const index = Array.prototype.indexOf.call(parent.children, node);
+      const defaultStart = start ? parseInt(start, 10) : 1;
+      prefix = defaultStart + index + ". ";
+    }
+
+    return (
+      prefix + content + (node.nextSibling && !/\n$/.test(content) ? "\n" : "")
+    );
+  },
+});
+
+// 保留某些需要保持HTML原样的元素
+turndownService.keep(["iframe", "embed", "script", "style", "canvas", "svg"]);
 
 // 日志记录函数 - 写入临时文件而不是控制台输出
 function logToFile(message) {
@@ -190,6 +317,89 @@ function parseConfluenceUrl(url) {
       spaceKey: "",
       contentId: "",
       title: "",
+    };
+  }
+}
+
+/**
+ * 从HTML中提取有意义的内容
+ * 使用JSDOM而不是正则表达式，以确保更准确地解析HTML
+ * @param {string} htmlContent - 完整的HTML内容
+ * @returns {Object} - 提取的内容 {title, content}
+ */
+function extractContentFromHtml(htmlContent) {
+  try {
+    // 创建JSDOM实例，启用runScripts: "dangerously"以允许脚本运行
+    const dom = new JSDOM(htmlContent, {
+      runScripts: "outside-only", // 不运行脚本但可以访问DOM
+      resources: "usable", // 允许加载资源
+      pretendToBeVisual: true, // 假装是可视环境
+    });
+
+    const document = dom.window.document;
+
+    // 尝试获取标题
+    let pageTitle = "";
+    const titleElement = document.querySelector("title");
+    if (titleElement) {
+      pageTitle = titleElement.textContent.trim();
+    } else {
+      const h1 = document.querySelector("h1");
+      if (h1) {
+        pageTitle = h1.textContent.trim();
+      }
+    }
+
+    // 尝试按优先级获取内容 - 但增加更多的选择器并调整优先级
+    const contentSelectors = [
+      // Confluence特定选择器
+      "#main-content",
+      "#content",
+      ".wiki-content",
+      ".confluence-content",
+      "#wiki-content",
+      ".page-content",
+      ".pageSection",
+      "#page",
+      // 通用选择器
+      "article",
+      "main",
+      ".article-content",
+      "#main",
+      // 最后的后备，直接获取完整页面内容
+      ".container",
+      ".content",
+    ];
+
+    let mainContent = null;
+
+    // 按优先级尝试不同的选择器
+    for (const selector of contentSelectors) {
+      const element = document.querySelector(selector);
+      if (element && element.innerHTML.trim().length > 100) {
+        // 只选择非空的有意义内容
+        mainContent = element;
+        logToFile(`成功使用选择器 ${selector} 找到内容`);
+        break;
+      }
+    }
+
+    // 如果没有找到任何特定的内容容器或找到的内容过少，回退到使用整个body
+    if (!mainContent || mainContent.innerHTML.trim().length < 200) {
+      mainContent = document.body;
+      logToFile("未找到特定内容容器或内容过少，使用整个body作为内容");
+    }
+
+    // 返回提取的内容
+    return {
+      title: pageTitle,
+      content: mainContent ? mainContent.outerHTML : htmlContent,
+    };
+  } catch (error) {
+    logToFile(`使用JSDOM提取内容时出错: ${error.message}`);
+    return {
+      title: "无法解析标题",
+      content: htmlContent, // 返回原始HTML作为后备
     };
   }
 }
@@ -468,38 +678,27 @@ server.tool(
 
       // 处理响应内容
       if (isDirectFetch) {
-        // 直接获取的页面，需要解析HTML内容
+        // 直接获取的页面，使用JSDOM解析HTML内容
         if (typeof response.data === "string") {
           try {
-            // 从HTML中提取主要内容
-            // 假设主要内容在id为"main-content"的div内
-            const mainContentMatch = response.data.match(
-              /<div[^>]*id="main-content"[^>]*>([\s\S]*?)<\/div>/i
+            // 使用JSDOM提取内容
+            logToFile(`收到HTML响应，大小: ${response.data.length} 字节`);
+            const extractedContent = extractContentFromHtml(response.data);
+            logToFile(
+              `提取的内容大小: ${extractedContent.content.length} 字节`
             );
-            const pageTitle = response.data.match(
-              /<title[^>]*>([\s\S]*?)<\/title>/i
-            );
-
-            let htmlContent = "";
-            if (mainContentMatch && mainContentMatch[1]) {
-              htmlContent = mainContentMatch[1];
-            } else {
-              // 如果找不到主要内容区，使用整个body内容
-              const bodyMatch = response.data.match(
-                /<body[^>]*>([\s\S]*?)<\/body>/i
-              );
-              if (bodyMatch && bodyMatch[1]) {
-                htmlContent = bodyMatch[1];
-              } else {
-                htmlContent = response.data;
-              }
-            }
 
             // 转换为Markdown
-            markdownContent = `# ${
-              pageTitle && pageTitle[1] ? pageTitle[1].trim() : "页面内容"
-            }\n\n`;
-            markdownContent += turndownService.turndown(htmlContent);
+            markdownContent = `# ${extractedContent.title || "页面内容"}\n\n`;
+            const convertedContent = turndownService.turndown(
+              extractedContent.content
+            );
+            logToFile(`转换后的Markdown大小: ${convertedContent.length} 字节`);
+            markdownContent += convertedContent;
+
+            // 日志记录转换的内容长度，以便调试
+            const lines = markdownContent.split("\n").length;
+            logToFile(`生成的Markdown有 ${lines} 行`);
           } catch (parseError) {
             logToFile(`解析HTML内容时出错: ${parseError.message}`);
             markdownContent = `# 获取到页面，但解析内容时出错\n\n错误详情: ${parseError.message}\n\n页面大小: ${response.data.length} 字节`;
