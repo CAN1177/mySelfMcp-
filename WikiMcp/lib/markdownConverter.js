@@ -1,6 +1,7 @@
 // markdownConverter.js - HTML到Markdown的转换模块
 import TurndownService from "turndown";
 import { logToFile } from "./logger.js";
+import path from "path";
 
 /**
  * 配置并返回Turndown服务实例
@@ -71,7 +72,7 @@ export function setupTurndownService() {
     },
   });
 
-  // 完全重写表格处理，确保表格能够正确渲染
+  // 修改表格处理，确保符合Markdown标准格式
   turndownService.addRule("tableCells", {
     filter: ["th", "td"],
     replacement: function (content, node) {
@@ -84,6 +85,7 @@ export function setupTurndownService() {
       // 确保表格单元格中的 | 符号不会破坏表格结构
       cellContent = cellContent.replace(/\|/g, "\\|");
 
+      // 标准Markdown表格单元格格式
       return ` ${cellContent} |`;
     },
   });
@@ -91,7 +93,7 @@ export function setupTurndownService() {
   turndownService.addRule("tableRow", {
     filter: "tr",
     replacement: function (content, node) {
-      // 确保行以 | 开始
+      // 确保每行以 | 开始
       let output = `|${content}\n`;
 
       // 如果是表头行，添加分隔行
@@ -121,7 +123,10 @@ export function setupTurndownService() {
         return "";
       }
 
-      // 如果表格没有thead，手动构建表头分隔符
+      // 确保表格有正确的表头和分隔符
+      let tableContent = content.trim();
+
+      // 如果表格没有thead，手动构建标准的表头分隔符
       if (!node.querySelector("thead") && rows.length > 0) {
         const firstRow = rows[0];
         const cellCount = firstRow.children.length;
@@ -133,24 +138,22 @@ export function setupTurndownService() {
             separator += " --- |";
           }
 
-          // 找到第一行结束的位置
-          const firstRowIndex = content.indexOf("\n");
+          // 在第一行后添加分隔行
+          const firstRowIndex = tableContent.indexOf("\n");
           if (firstRowIndex !== -1) {
-            // 在第一行后添加分隔行
-            content =
-              content.substring(0, firstRowIndex) +
+            tableContent =
+              tableContent.substring(0, firstRowIndex) +
               "\n" +
               separator +
-              content.substring(firstRowIndex);
-          } else if (content.trim()) {
-            // 如果找不到换行但内容不为空，直接添加分隔行
-            content += "\n" + separator;
+              tableContent.substring(firstRowIndex);
+          } else if (tableContent.trim()) {
+            tableContent += "\n" + separator;
           }
         }
       }
 
       // 确保表格前后有空行，以便正确渲染
-      return "\n\n" + content.trim() + "\n\n";
+      return "\n\n" + tableContent + "\n\n";
     },
   });
 
@@ -247,11 +250,32 @@ export function updateImagePathsInMarkdown(markdown, imageMap) {
     return markdown;
   }
 
+  // 获取用户桌面路径
+  const desktopPath = path.join(
+    process.env.HOME || process.env.USERPROFILE,
+    "Desktop"
+  );
+
   // 替换所有图片的URL
   imageMap.forEach((localPath, originalUrl) => {
     try {
       // 处理URL中的特殊字符，创建安全的正则表达式
       const escapedUrl = originalUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+      // 生成相对于当前目录的路径
+      let relativePath = localPath;
+      if (localPath.startsWith("./")) {
+        // 使用相对路径
+        relativePath = localPath;
+      } else if (path.isAbsolute(localPath)) {
+        // 转换绝对路径为相对路径
+        const relativeToCurrent = path.relative(process.cwd(), localPath);
+        if (!relativeToCurrent.startsWith("..")) {
+          relativePath = `./${relativeToCurrent}`;
+        } else {
+          relativePath = localPath;
+        }
+      }
 
       // 标准的Markdown图片语法匹配
       const imgRegex = new RegExp(
@@ -263,12 +287,11 @@ export function updateImagePathsInMarkdown(markdown, imageMap) {
       updatedMarkdown = updatedMarkdown.replace(
         imgRegex,
         (match, alt, titlePart) => {
-          return `![${alt}](${localPath}${titlePart})`;
+          return `![${alt}](${relativePath}${titlePart})`;
         }
       );
 
-      // 额外处理表格中的图片路径替换
-      // 表格中的图片可能使用 | 和 换行符等特殊字符，需要特殊处理
+      // 处理表格中的图片路径替换
       const tableImgRegex = new RegExp(
         `\\|([^|]*)${escapedUrl}([^|]*)\\|`,
         "g"
@@ -277,11 +300,11 @@ export function updateImagePathsInMarkdown(markdown, imageMap) {
       updatedMarkdown = updatedMarkdown.replace(
         tableImgRegex,
         (match, before, after) => {
-          return `|${before}${localPath}${after}|`;
+          return `|${before}${relativePath}${after}|`;
         }
       );
 
-      logToFile(`替换图片路径: ${originalUrl} -> ${localPath}`);
+      logToFile(`替换图片路径: ${originalUrl} -> ${relativePath}`);
     } catch (error) {
       logToFile(`替换图片路径出错: ${error.message}`);
     }
