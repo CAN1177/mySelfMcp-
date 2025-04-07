@@ -6,154 +6,49 @@ import cors from "cors";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
 import axios from "axios";
-import TurndownService from "turndown";
-import { JSDOM } from "jsdom";
 import dotenv from "dotenv";
-import fs from "fs";
 import readline from "readline";
+
+// 引入抽离的模块
+import { parseConfluenceUrl } from "./lib/urlParser.js";
+import { extractContentFromHtml } from "./lib/htmlParser.js";
+import {
+  setupTurndownService,
+  updateImagePathsInMarkdown,
+  extractImagesFromHtml,
+} from "./lib/markdownConverter.js";
+import { logToFile } from "./lib/logger.js";
+import { downloadImagesFromHtml } from "./lib/imageDownloader.js";
+import { getWikiContentHandler } from "./lib/wikiContentHandler.js";
 
 // 加载环境变量
 dotenv.config();
 
-// 创建HTML到Markdown的转换器，使用完整的配置选项
-const turndownService = new TurndownService({
-  headingStyle: "atx",
-  codeBlockStyle: "fenced",
-  bulletListMarker: "-",
-  hr: "---",
-  emDelimiter: "_",
-  strongDelimiter: "**",
-  linkStyle: "inlined",
-  linkReferenceStyle: "full",
-  preformattedCode: true,
+// 创建HTML到Markdown的转换器
+const turndownService = setupTurndownService();
+
+// 创建MCP服务器
+const server = new McpServer({
+  name: "WikiMcp",
+  version: "1.0.0",
+  description: "通过MCP协议获取Confluence wiki内容并转换为Markdown格式",
 });
 
-// 添加自定义规则，确保更多HTML元素能够被正确转换
-turndownService.addRule("strikethrough", {
-  filter: ["del", "s", "strike"],
-  replacement: (content) => `~~${content}~~`,
+// 捕获全局错误
+process.on("uncaughtException", (error) => {
+  logToFile(`未捕获的异常: ${error.stack || error.message || error}`);
 });
 
-turndownService.addRule("underline", {
-  filter: ["u"],
-  replacement: (content) => `<u>${content}</u>`,
-});
+// 创建Express应用
+const app = express();
+app.use(cors());
+app.use(express.json());
 
-// 优化图片处理
-turndownService.addRule("image", {
-  filter: "img",
-  replacement: function (content, node) {
-    const alt = node.alt || "";
-    let src = node.getAttribute("src") || "";
+const PORT = process.env.PORT || 3331;
 
-    // 处理相对路径
-    if (src && !src.startsWith("http") && !src.startsWith("data:")) {
-      // 保持原始路径，不做修改
-      logToFile(`保留相对图片路径: ${src}`);
-    }
-
-    const title = node.title || alt;
-    const titlePart = title ? ` "${title}"` : "";
-    return `![${alt}](${src}${titlePart})`;
-  },
-});
-
-// 改进表格处理
-turndownService.addRule("tableCells", {
-  filter: ["th", "td"],
-  replacement: function (content, node) {
-    const delimiter =
-      node.parentNode.parentNode.tagName === "THEAD" ? "---" : "   ";
-    return ` ${content.trim() || " "} |`;
-  },
-});
-
-turndownService.addRule("tableRow", {
-  filter: "tr",
-  replacement: function (content, node) {
-    let output = `|${content}\n`;
-
-    // 如果是表头行，添加分隔行
-    if (node.parentNode.tagName === "THEAD") {
-      const cellCount = node.children.length;
-      let separatorRow = "|";
-      for (let i = 0; i < cellCount; i++) {
-        separatorRow += " --- |";
-      }
-      output += separatorRow + "\n";
-    }
-
-    return output;
-  },
-});
-
-turndownService.addRule("table", {
-  filter: function (node) {
-    return node.nodeName === "TABLE";
-  },
-  replacement: function (content, node) {
-    // 如果表格没有thead，手动构建表头分隔符
-    if (!node.querySelector("thead") && node.querySelector("tr")) {
-      const firstRow = node.querySelector("tr");
-      const cellCount = firstRow.children.length;
-
-      if (cellCount > 0) {
-        let separator = "\n|";
-        for (let i = 0; i < cellCount; i++) {
-          separator += " --- |";
-        }
-        separator += "\n";
-
-        // 在第一行后添加分隔符
-        const firstRowIndex = content.indexOf("\n");
-        if (firstRowIndex !== -1) {
-          content =
-            content.substring(0, firstRowIndex) +
-            separator +
-            content.substring(firstRowIndex);
-        }
-      }
-    }
-
-    return "\n\n" + content + "\n\n";
-  },
-});
-
-// 处理列表
-turndownService.addRule("listItem", {
-  filter: "li",
-  replacement: function (content, node, options) {
-    content = content
-      .replace(/^\n+/, "") // 移除开头的换行
-      .replace(/\n+$/, "\n") // 确保只有一个结尾换行
-      .replace(/\n/gm, "\n    "); // 缩进内容
-
-    let prefix = options.bulletListMarker + " ";
-    let parent = node.parentNode;
-
-    if (parent.nodeName === "OL") {
-      const start = parent.getAttribute("start");
-      const index = Array.prototype.indexOf.call(parent.children, node);
-      const defaultStart = start ? parseInt(start, 10) : 1;
-      prefix = defaultStart + index + ". ";
-    }
-
-    return (
-      prefix + content + (node.nextSibling && !/\n$/.test(content) ? "\n" : "")
-    );
-  },
-});
-
-// 保留某些需要保持HTML原样的元素
-turndownService.keep(["iframe", "embed", "script", "style", "canvas", "svg"]);
-
-// 日志记录函数 - 写入临时文件而不是控制台输出
-function logToFile(message) {
-  const logPath = "/tmp/wikimcp-log.txt";
-  fs.appendFileSync(logPath, new Date().toISOString() + ": " + message + "\n");
-}
+// 存储会话信息的对象
+const transports = {};
 
 // 询问链家wiki token的函数
 async function askForLianjiaAuth() {
@@ -208,580 +103,17 @@ async function askForLianjiaAuth() {
   });
 }
 
-// 创建MCP服务器
-const server = new McpServer({
-  name: "WikiMcp",
-  version: "1.0.0",
-  description: "通过MCP协议获取Confluence wiki内容并转换为Markdown格式",
+// 定义获取Wiki内容的工具，使用抽离的处理器函数
+server.tool("getWikiContent", getWikiContentHandler.schema, async (params) => {
+  return await getWikiContentHandler.handler(params, {
+    parseUrl: parseConfluenceUrl,
+    extractHtml: extractContentFromHtml,
+    downloadImages: downloadImagesFromHtml,
+    turndownService: turndownService,
+    extractImages: extractImagesFromHtml,
+    logToFile: logToFile,
+  });
 });
-
-// 捕获全局错误
-process.on("uncaughtException", (error) => {
-  logToFile(`未捕获的异常: ${error.stack || error.message || error}`);
-});
-
-// 创建Express应用
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-const PORT = process.env.PORT || 3331;
-
-// 存储会话信息的对象
-const transports = {};
-
-/**
- * 解析Confluence Wiki链接
- * 支持以下格式:
- * - http://yourcompany.com/confluence/display/SPACEKEY/Page+Title
- * - http://yourcompany.com/confluence/pages/viewpage.action?pageId=123456
- * - http://yourcompany.com/confluence/spaces/SPACEKEY/pages/123456/Page+Title
- * @param {string} url - Confluence页面URL
- * @returns {Object} - 解析后的参数对象 {baseUrl, spaceKey, contentId, title}
- */
-function parseConfluenceUrl(url) {
-  try {
-    const parsedUrl = new URL(url);
-    const result = {
-      baseUrl: "",
-      spaceKey: "",
-      contentId: "",
-      title: "",
-    };
-
-    // 提取基本URL (协议 + 主机 + 可能的上下文路径)
-    const pathParts = parsedUrl.pathname.split("/");
-
-    // 确定Confluence上下文路径
-    let contextPath = "/";
-    const confluencePathMarkers = ["display", "spaces", "pages", "browse"];
-
-    for (let i = 1; i < pathParts.length; i++) {
-      if (confluencePathMarkers.includes(pathParts[i])) {
-        contextPath = "/" + pathParts.slice(1, i).join("/");
-        break;
-      }
-    }
-
-    // 构建baseUrl
-    result.baseUrl = `${parsedUrl.protocol}//${parsedUrl.host}${contextPath}`;
-
-    // 解析不同格式的URL
-    if (parsedUrl.pathname.includes("/display/")) {
-      // 格式: /display/SPACEKEY/Page+Title
-      const displayIndex = parsedUrl.pathname.indexOf("/display/");
-      const parts = parsedUrl.pathname.slice(displayIndex + 9).split("/");
-
-      if (parts.length >= 1) {
-        result.spaceKey = parts[0];
-      }
-
-      if (parts.length >= 2) {
-        result.title = decodeURIComponent(
-          parts.slice(1).join("/").replace(/\+/g, " ")
-        );
-      }
-    } else if (parsedUrl.pathname.includes("/spaces/")) {
-      // 格式: /spaces/SPACEKEY/pages/123456/Page+Title
-      const spacesIndex = parsedUrl.pathname.indexOf("/spaces/");
-      const parts = parsedUrl.pathname.slice(spacesIndex + 8).split("/");
-
-      if (parts.length >= 1) {
-        result.spaceKey = parts[0];
-      }
-
-      if (parts.length >= 3 && parts[1] === "pages") {
-        result.contentId = parts[2];
-      }
-
-      if (parts.length >= 4) {
-        result.title = decodeURIComponent(
-          parts.slice(3).join("/").replace(/\+/g, " ")
-        );
-      }
-    } else if (parsedUrl.pathname.includes("/pages/viewpage.action")) {
-      // 格式: /pages/viewpage.action?pageId=123456
-      result.contentId = parsedUrl.searchParams.get("pageId") || "";
-
-      // 对于viewpage.action链接，我们无法直接获取spaceKey，需要后续通过API获取
-    } else if (parsedUrl.pathname.includes("/pages/view.action")) {
-      // 格式: /pages/view.action?pageId=123456
-      result.contentId = parsedUrl.searchParams.get("pageId") || "";
-    }
-
-    return result;
-  } catch (error) {
-    console.error("解析Wiki链接失败:", error);
-    return {
-      baseUrl: "",
-      spaceKey: "",
-      contentId: "",
-      title: "",
-    };
-  }
-}
-
-/**
- * 从HTML中提取有意义的内容
- * 使用JSDOM而不是正则表达式，以确保更准确地解析HTML
- * @param {string} htmlContent - 完整的HTML内容
- * @returns {Object} - 提取的内容 {title, content}
- */
-function extractContentFromHtml(htmlContent) {
-  try {
-    // 创建JSDOM实例，启用runScripts: "dangerously"以允许脚本运行
-    const dom = new JSDOM(htmlContent, {
-      runScripts: "outside-only", // 不运行脚本但可以访问DOM
-      resources: "usable", // 允许加载资源
-      pretendToBeVisual: true, // 假装是可视环境
-    });
-
-    const document = dom.window.document;
-
-    // 尝试获取标题
-    let pageTitle = "";
-    const titleElement = document.querySelector("title");
-    if (titleElement) {
-      pageTitle = titleElement.textContent.trim();
-    } else {
-      const h1 = document.querySelector("h1");
-      if (h1) {
-        pageTitle = h1.textContent.trim();
-      }
-    }
-
-    // 尝试按优先级获取内容 - 但增加更多的选择器并调整优先级
-    const contentSelectors = [
-      // Confluence特定选择器
-      "#main-content",
-      "#content",
-      ".wiki-content",
-      ".confluence-content",
-      "#wiki-content",
-      ".page-content",
-      ".pageSection",
-      "#page",
-      // 通用选择器
-      "article",
-      "main",
-      ".article-content",
-      "#main",
-      // 最后的后备，直接获取完整页面内容
-      ".container",
-      ".content",
-    ];
-
-    let mainContent = null;
-
-    // 按优先级尝试不同的选择器
-    for (const selector of contentSelectors) {
-      const element = document.querySelector(selector);
-      if (element && element.innerHTML.trim().length > 100) {
-        // 只选择非空的有意义内容
-        mainContent = element;
-        logToFile(`成功使用选择器 ${selector} 找到内容`);
-        break;
-      }
-    }
-
-    // 如果没有找到任何特定的内容容器或找到的内容过少，回退到使用整个body
-    if (!mainContent || mainContent.innerHTML.trim().length < 200) {
-      mainContent = document.body;
-      logToFile("未找到特定内容容器或内容过少，使用整个body作为内容");
-    }
-
-    // 返回提取的内容
-    return {
-      title: pageTitle,
-      content: mainContent ? mainContent.outerHTML : htmlContent,
-    };
-  } catch (error) {
-    logToFile(`使用JSDOM提取内容时出错: ${error.message}`);
-    return {
-      title: "无法解析标题",
-      content: htmlContent, // 返回原始HTML作为后备
-    };
-  }
-}
-
-// 定义获取Wiki内容的工具
-server.tool(
-  "getWikiContent",
-  {
-    url: z
-      .string()
-      .describe(
-        "Confluence Wiki页面的完整URL，例如：http://公司服务器地址:端口/confluence/pages/viewpage.action?pageId=123456"
-      ),
-    baseUrl: z
-      .string()
-      .optional()
-      .describe("Confluence服务器的基本URL（可选，如果提供了URL则会自动解析）"),
-    spaceKey: z
-      .string()
-      .optional()
-      .describe(
-        "Wiki空间的键值，例如：DEV, HR等（可选，如果提供了URL则会自动解析）"
-      ),
-    title: z.string().optional().describe("文档的标题（可选）"),
-    contentId: z
-      .string()
-      .optional()
-      .describe("文档的ID（可选，如果提供了URL则会自动解析）"),
-    username: z
-      .string()
-      .optional()
-      .describe("Confluence用户名（可选，如果不提供则使用环境变量中的用户名）"),
-    password: z
-      .string()
-      .optional()
-      .describe(
-        "Confluence密码或API令牌（可选，如果不提供则使用环境变量中的密码）"
-      ),
-    token: z
-      .string()
-      .optional()
-      .describe("特定Wiki系统的访问Token（如链家Wiki需要Token认证）"),
-    cookie: z
-      .string()
-      .optional()
-      .describe(
-        "完整的Cookie字符串，用于需要Cookie认证的Wiki系统（如链家Wiki）"
-      ),
-    expand: z
-      .string()
-      .optional()
-      .default("body.storage,space,version")
-      .describe("要扩展的内容字段"),
-  },
-  async ({
-    url,
-    baseUrl,
-    spaceKey,
-    title,
-    contentId,
-    username,
-    password,
-    token,
-    cookie,
-    expand,
-  }) => {
-    try {
-      let urlToFetch = "";
-      let isDirectFetch = false;
-
-      // 如果提供了URL，则解析URL获取参数
-      if (url) {
-        const parsedParams = parseConfluenceUrl(url);
-        baseUrl = parsedParams.baseUrl || baseUrl;
-        spaceKey = parsedParams.spaceKey || spaceKey;
-        contentId = parsedParams.contentId || contentId;
-        title = parsedParams.title || title;
-
-        // 特定域名的特殊处理
-        if (url.includes("wiki.lianjia.com")) {
-          // 对于链家wiki，尝试直接获取页面内容而不是使用API
-          isDirectFetch = true;
-          urlToFetch = url;
-          logToFile(`检测到链家wiki域名，将直接获取页面 ${url}`);
-
-          // 身份验证优先级：Cookie > Token > 环境变量
-          if (cookie) {
-            // 使用Cookie认证
-            logToFile("使用提供的Cookie进行链家Wiki认证");
-            // 设置认证方式为cookie，后面会用
-            username = "cookie";
-            password = cookie;
-          }
-          // 其次使用传入的token
-          else if (token) {
-            logToFile("使用提供的token进行链家Wiki认证");
-            username = "token";
-            password = token;
-          }
-          // 再次使用环境变量中的cookie
-          else if (process.env.LIANJIA_COOKIE) {
-            logToFile("使用环境变量中的LIANJIA_COOKIE进行认证");
-            username = "cookie";
-            password = process.env.LIANJIA_COOKIE;
-          }
-          // 最后使用环境变量中的token
-          else if (process.env.LIANJIA_TOKEN) {
-            logToFile("使用环境变量中的LIANJIA_TOKEN进行认证");
-            username = "token";
-            password = process.env.LIANJIA_TOKEN;
-          }
-          // 如果没有提供任何认证信息，返回交互式指南而不是错误
-          else {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `# 需要认证信息才能访问链家Wiki页面\n\n要访问这个Wiki，我们需要提供身份验证信息，可以是以下几种方式之一：\n\n## 1. 用户名和密码\n\n在下次调用时添加以下参数：\n\`\`\`json\n{\n  "url": "${url}",\n  "username": "您的链家wiki用户名",\n  "password": "您的链家wiki密码"\n}\n\`\`\`\n\n## 2. 认证令牌(token)\n\n在下次调用时添加以下参数：\n\`\`\`json\n{\n  "url": "${url}",\n  "token": "您的链家wiki访问token"\n}\n\`\`\`\n\n## 3. Cookie信息\n\n这是最推荐的方式，因为可以直接使用您在浏览器中的登录状态：\n\n1. 使用浏览器登录链家Wiki\n2. 打开开发者工具（F12或右键→检查）\n3. 切换到Network(网络)标签页\n4. 刷新页面，点击任意请求\n5. 找到Headers(标头)中的Cookie字段\n6. 复制完整的Cookie值\n\n然后在下次调用时添加以下参数：\n\`\`\`json\n{\n  "url": "${url}",\n  "cookie": "您复制的完整Cookie字符串"\n}\n\`\`\`\n\n请提供上述任一认证方式，我将帮您获取并分析这个Wiki页面的内容。`,
-                },
-              ],
-            };
-          }
-        }
-      }
-
-      // 如果没有提供用户名和密码，则使用环境变量中的值(对于非直接获取模式)
-      if (!isDirectFetch) {
-        username = username || process.env.CONFLUENCE_USERNAME;
-        password = password || process.env.CONFLUENCE_PASSWORD;
-      }
-
-      // 验证必要的参数
-      if (!isDirectFetch && !baseUrl) {
-        throw new Error("缺少baseUrl参数，需要提供Confluence服务器的基本URL");
-      }
-
-      if (!isDirectFetch && (!username || !password)) {
-        throw new Error(
-          "缺少认证信息，请提供username和password参数或在环境变量中配置，或者对于链家Wiki，提供token或cookie参数"
-        );
-      }
-
-      // 创建认证头（基本认证、token认证或cookie认证）
-      let headers = {};
-      let authConfig = {};
-
-      if (username === "token") {
-        // 使用token认证
-        headers = {
-          Authorization: `Bearer ${password}`,
-          // 添加模拟浏览器的请求头
-          "User-Agent":
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
-          Accept:
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        };
-      } else if (username === "cookie") {
-        // 使用cookie认证
-        headers = {
-          Cookie: password,
-          // 添加更多模拟浏览器的请求头
-          "User-Agent":
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
-          Accept:
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        };
-
-        // 添加referer头
-        if (isDirectFetch && urlToFetch) {
-          headers["Referer"] = new URL(urlToFetch).origin;
-        } else if (baseUrl) {
-          headers["Referer"] = baseUrl;
-        }
-      } else {
-        // 使用基本认证
-        authConfig = {
-          username,
-          password,
-        };
-      }
-
-      // 根据是否直接获取页面来决定请求URL
-      let apiUrl, params;
-
-      if (isDirectFetch) {
-        apiUrl = urlToFetch;
-        params = {};
-        logToFile(`将直接获取页面: ${apiUrl}`);
-      } else {
-        // 使用Confluence API
-        apiUrl = `${baseUrl}/rest/api/content`;
-        params = {
-          expand,
-        };
-
-        // 添加spaceKey参数（如果有）
-        if (spaceKey) {
-          params.spaceKey = spaceKey;
-        }
-
-        // 如果提供了标题，则按标题筛选
-        if (title) {
-          params.title = title;
-        }
-
-        // 如果提供了内容ID，则直接获取该内容
-        if (contentId) {
-          apiUrl = `${apiUrl}/${contentId}`;
-          params = { expand };
-        }
-      }
-
-      // 记录请求详情，便于调试
-      logToFile(`请求URL: ${apiUrl}`);
-      logToFile(`请求参数: ${JSON.stringify(params)}`);
-      logToFile(
-        `认证方式: ${
-          username === "cookie"
-            ? "Cookie"
-            : username === "token"
-            ? "Token"
-            : "Basic"
-        }`
-      );
-
-      // 调用API或直接获取页面
-      const response = await axios.get(apiUrl, {
-        auth:
-          username === "token" || username === "cookie"
-            ? undefined
-            : authConfig,
-        headers,
-        params,
-        // 添加超时设置
-        timeout: 15000,
-        // 允许跟随重定向
-        maxRedirects: 5,
-        validateStatus: function (status) {
-          // 接受所有状态码，以便我们可以处理错误
-          return true;
-        },
-      });
-
-      // 记录响应状态
-      logToFile(`响应状态码: ${response.status}`);
-
-      // 处理错误状态码
-      if (response.status >= 400) {
-        let errorMessage = "";
-
-        if (response.status === 404) {
-          errorMessage = `# 无法获取Wiki内容 (404错误)\n\n服务器返回了404错误。这表示请求的页面不存在或您没有访问权限。可能的原因有：\n\n1. 页面ID可能不正确或页面已被删除\n2. Cookie/Token可能已过期或无效\n3. 您可能没有访问该页面的权限\n4. Wiki系统可能发生了变化\n\n## 请尝试以下步骤：\n\n1. 检查页面ID是否正确\n2. 更新Cookie信息（从浏览器中获取最新的Cookie）\n3. 确认您有权限访问该页面\n4. 通过Wiki界面直接访问该页面，确认其是否存在\n\n如果您能通过浏览器直接访问，但这里无法获取，请尝试：\n\n1. 使用更完整的Cookie信息\n2. 确认Cookie中包含了所有必要的验证信息\n\n具体错误: ${
-            response.data && typeof response.data === "string"
-              ? response.data.substring(0, 500)
-              : "未提供详细错误信息"
-          }`;
-        } else {
-          errorMessage = `# 获取Wiki内容时出错: HTTP ${
-            response.status
-          }\n\n服务器返回了错误状态码。详细信息：\n\n${
-            response.data && typeof response.data === "string"
-              ? response.data.substring(0, 500)
-              : JSON.stringify(response.data, null, 2).substring(0, 500)
-          }`;
-        }
-
-        return {
-          content: [{ type: "text", text: errorMessage }],
-          isError: true,
-        };
-      }
-
-      let markdownContent = "";
-
-      // 处理响应内容
-      if (isDirectFetch) {
-        // 直接获取的页面，使用JSDOM解析HTML内容
-        if (typeof response.data === "string") {
-          try {
-            // 使用JSDOM提取内容
-            logToFile(`收到HTML响应，大小: ${response.data.length} 字节`);
-            const extractedContent = extractContentFromHtml(response.data);
-            logToFile(
-              `提取的内容大小: ${extractedContent.content.length} 字节`
-            );
-
-            // 转换为Markdown
-            markdownContent = `# ${extractedContent.title || "页面内容"}\n\n`;
-            const convertedContent = turndownService.turndown(
-              extractedContent.content
-            );
-            logToFile(`转换后的Markdown大小: ${convertedContent.length} 字节`);
-            markdownContent += convertedContent;
-
-            // 日志记录转换的内容长度，以便调试
-            const lines = markdownContent.split("\n").length;
-            logToFile(`生成的Markdown有 ${lines} 行`);
-          } catch (parseError) {
-            logToFile(`解析HTML内容时出错: ${parseError.message}`);
-            markdownContent = `# 获取到页面，但解析内容时出错\n\n错误详情: ${parseError.message}\n\n页面大小: ${response.data.length} 字节`;
-          }
-        } else {
-          markdownContent = `# 获取到非文本响应\n\n服务器返回了非文本内容，无法解析为Markdown。`;
-        }
-      } else {
-        // Confluence API响应处理
-        if (contentId) {
-          // 单个文档响应格式
-          const result = response.data;
-          if (result.body && result.body.storage && result.body.storage.value) {
-            // 将HTML内容转换为Markdown
-            markdownContent = `# ${result.title || "文档"}\n\n`;
-            markdownContent += turndownService.turndown(
-              result.body.storage.value
-            );
-          } else {
-            // 当没有正确的内容格式时
-            logToFile(
-              `接收到的数据结构不符合预期: ${JSON.stringify(result).substring(
-                0,
-                200
-              )}...`
-            );
-            markdownContent = `# ${
-              result.title || "获取的文档"
-            }\n\n*无法解析文档内容，可能格式不兼容或响应结构发生变化*\n\n原始响应数据：\n\`\`\`json\n${JSON.stringify(
-              result,
-              null,
-              2
-            ).substring(0, 1000)}...\n\`\`\``;
-          }
-        } else {
-          // 文档列表响应格式
-          const result = response.data;
-          if (result.results && result.results.length > 0) {
-            // 格式化结果列表
-            markdownContent = `# 找到 ${result.results.length} 个文档\n\n`;
-
-            for (const item of result.results) {
-              markdownContent += `## ${item.title}\n`;
-              markdownContent += `- ID: ${item.id}\n`;
-              markdownContent += `- 空间: ${
-                item.space?.name || spaceKey || "未知空间"
-              }\n`;
-              markdownContent += `- 链接: ${baseUrl}/pages/viewpage.action?pageId=${item.id}\n\n`;
-
-              if (item.body && item.body.storage && item.body.storage.value) {
-                markdownContent +=
-                  turndownService.turndown(item.body.storage.value) + "\n\n";
-              }
-            }
-          } else {
-            markdownContent = "未找到匹配的文档";
-          }
-        }
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: markdownContent,
-          },
-        ],
-      };
-    } catch (error) {
-      logToFile(`获取Wiki内容时发生错误: ${error.stack || error.message}`);
-      console.error("获取Wiki内容时出错:", error.message);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `# 获取Wiki内容时出错\n\n发生了一个错误: ${error.message}\n\n请检查您的连接和认证信息是否正确。如果您使用的是Cookie认证，请确保Cookie是完整且有效的。`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  }
-);
 
 // 定义资源接口，通过URI获取文档
 server.resource(
@@ -823,17 +155,49 @@ server.resource(
       let markdownContent = "";
 
       if (contentId && contentId !== "list") {
-        // 单个文档响应
+        // 单个文档响应格式
         const result = response.data;
         markdownContent = `# ${result.title}\n\n`;
 
         if (result.body && result.body.storage && result.body.storage.value) {
-          markdownContent += turndownService.turndown(
-            result.body.storage.value
+          // 提取HTML内容
+          const htmlContent = result.body.storage.value;
+
+          // 将API返回的HTML内容包装成完整的HTML文档以便处理图片
+          const fullHtml = `<!DOCTYPE html><html><head><title>${
+            result.title || "Wiki Document"
+          }</title></head><body>${htmlContent}</body></html>`;
+          const extractedContent = extractContentFromHtml(fullHtml);
+
+          // 下载图片
+          const imageDownloadResult = await downloadImagesFromHtml(
+            extractedContent,
+            baseUrl,
+            {
+              Authorization: `Basic ${Buffer.from(
+                `${username}:${password}`
+              ).toString("base64")}`,
+            },
+            contentId
           );
+
+          // 转换为Markdown
+          const convertedContent = turndownService.turndown(htmlContent);
+          markdownContent += convertedContent;
+
+          // 如果有下载的图片，更新图片路径
+          if (imageDownloadResult.imageMap.size > 0) {
+            markdownContent = updateImagePathsInMarkdown(
+              markdownContent,
+              imageDownloadResult.imageMap
+            );
+
+            // 添加图片下载信息
+            markdownContent += `\n\n---\n\n> 注意：文档中的 ${imageDownloadResult.imageMap.size} 张图片已下载到本地文件夹 ${imageDownloadResult.imageFolderPath}，并在Markdown中使用相对路径引用。`;
+          }
         }
       } else {
-        // 文档列表响应
+        // 文档列表响应格式
         const result = response.data;
         markdownContent = `# ${spaceKey} 空间的文档列表\n\n`;
 
@@ -873,6 +237,9 @@ server.resource(
 // 启动服务器函数
 async function startServer() {
   try {
+    console.log("WikiMcp 服务器启动中...");
+    console.log("增强版本: 支持表格中图片、改进的表格解析");
+
     const serverType = process.env.SERVER_TYPE || "stdio";
 
     // 如果是HTTP模式，询问链家wiki token
@@ -920,12 +287,25 @@ async function startServer() {
             <style>
               body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
               h1 { color: #0052CC; }
+              h2 { color: #0747A6; margin-top: 30px; }
               code { background: #f4f5f7; padding: 2px 5px; border-radius: 3px; }
+              pre { background: #f4f5f7; padding: 15px; border-radius: 5px; overflow-x: auto; }
+              .feature { background: #E3FCEF; padding: 10px 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #36B37E; }
             </style>
           </head>
           <body>
             <h1>WikiMcp 服务器</h1>
             <p>这是一个MCP服务器，可以通过MCP协议获取Confluence Wiki内容并转换为Markdown格式。</p>
+            
+            <div class="feature">
+              <h2>增强功能</h2>
+              <ul>
+                <li><strong>表格支持</strong>：正确解析和渲染复杂表格结构，包括嵌套表格和合并单元格</li>
+                <li><strong>图片下载</strong>：自动下载Wiki文档中的所有图片(包括表格中的图片)，存储到桌面的WikiImages文件夹中</li>
+                <li><strong>离线访问</strong>：生成的Markdown使用相对路径引用图片，方便离线浏览</li>
+              </ul>
+            </div>
+            
             <h2>使用方法</h2>
             <p>通过MCP客户端连接到该服务器的SSE端点：<code>${
               req.protocol
@@ -947,6 +327,20 @@ async function startServer() {
   username: "用户名", // 可选，如果环境变量中已配置
   password: "密码或API令牌" // 可选，如果环境变量中已配置
 })</pre>
+            <p><strong>链家Wiki专用参数</strong>：</p>
+            <pre>getWikiContent({
+  url: "https://wiki.lianjia.com/pages/viewpage.action?pageId=123456",
+  cookie: "您的完整Cookie字符串" // 推荐
+})</pre>
+            
+            <h2>图片和表格处理</h2>
+            <p>WikiMcp会自动：</p>
+            <ul>
+              <li>识别Wiki文档中的所有图片，包括表格中的图片</li>
+              <li>下载图片到桌面上的WikiImages/[文档名_哈希]文件夹</li>
+              <li>特殊处理表格中的图片，确保在Markdown表格中正确显示</li>
+              <li>修复表格结构，确保复杂表格在Markdown预览中正确渲染</li>
+            </ul>
           </body>
           </html>
         `);
