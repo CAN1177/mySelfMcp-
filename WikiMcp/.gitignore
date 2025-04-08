@@ -42,3 +42,6 @@ pnpm-lock.yaml
 # Optional: local development files
 .cursor/
 *.local 
+
+# 忽略所有图片
+images/

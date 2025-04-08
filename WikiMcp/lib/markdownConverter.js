@@ -250,32 +250,22 @@ export function updateImagePathsInMarkdown(markdown, imageMap) {
     return markdown;
   }
 
-  // 获取用户桌面路径
-  const desktopPath = path.join(
-    process.env.HOME || process.env.USERPROFILE,
-    "Desktop"
-  );
-
   // 替换所有图片的URL
   imageMap.forEach((localPath, originalUrl) => {
     try {
       // 处理URL中的特殊字符，创建安全的正则表达式
       const escapedUrl = originalUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-      // 生成相对于当前目录的路径
-      let relativePath = localPath;
-      if (localPath.startsWith("./")) {
-        // 使用相对路径
-        relativePath = localPath;
-      } else if (path.isAbsolute(localPath)) {
-        // 转换绝对路径为相对路径
-        const relativeToCurrent = path.relative(process.cwd(), localPath);
-        if (!relativeToCurrent.startsWith("..")) {
-          relativePath = `./${relativeToCurrent}`;
-        } else {
-          relativePath = localPath;
-        }
-      }
+      // 确保使用正确的相对路径格式：./images/文件名
+      // 从路径中提取文件名
+      const fileName = localPath.includes("/")
+        ? path.basename(localPath)
+        : localPath;
+
+      // 固定使用./images/文件名格式
+      const relativePath = `./images/${fileName}`;
+
+      logToFile(`图片路径映射: ${originalUrl} -> ${relativePath}`);
 
       // 标准的Markdown图片语法匹配
       const imgRegex = new RegExp(

@@ -27,33 +27,73 @@ export async function downloadImagesFromHtml(
   }
 
   try {
-    // 创建唯一的文件夹名
-    const folderHash = crypto
-      .createHash("md5")
-      .update(pageId || Date.now().toString())
-      .digest("hex")
-      .substring(0, 8);
-    const pageName = sanitizeFilename(extractedContent.title || "wiki_page");
-    const imageFolderName = `${pageName}_${folderHash}`;
+    // 获取当前模块的绝对路径
+    const currentFilePath = new URL(import.meta.url).pathname;
+    // 获取WikiMcp目录的绝对路径
+    const wikiMcpDir = path.dirname(path.dirname(currentFilePath));
 
-    // 在桌面创建图片存放文件夹
-    const desktopPath = path.join(
-      process.env.HOME || process.env.USERPROFILE,
-      "Desktop"
-    );
-    const wikiImageBasePath = path.join(desktopPath, "WikiImages");
-    const imageFolderPath = path.join(wikiImageBasePath, imageFolderName);
+    // 创建images目录的绝对路径
+    const imageFolderPath = path.join(wikiMcpDir, "images");
 
-    // 创建目录结构
-    if (!fs.existsSync(wikiImageBasePath)) {
-      fs.mkdirSync(wikiImageBasePath, { recursive: true });
+    logToFile(`======图片下载信息======`);
+    logToFile(`当前模块路径: ${currentFilePath}`);
+    logToFile(`WikiMcp目录: ${wikiMcpDir}`);
+    logToFile(`图片保存路径: ${imageFolderPath}`);
+
+    // 如果images文件夹已存在，先清空它
+    if (fs.existsSync(imageFolderPath)) {
+      logToFile(`图片目录已存在，准备清空`);
+      try {
+        const files = fs.readdirSync(imageFolderPath);
+        logToFile(`发现 ${files.length} 个文件需要清除`);
+        for (const file of files) {
+          if (file !== ".gitkeep" && file !== "test.txt") {
+            // 保留某些文件
+            const filePath = path.join(imageFolderPath, file);
+            fs.unlinkSync(filePath);
+            logToFile(`已删除文件: ${filePath}`);
+          }
+        }
+        logToFile(`已清空图片文件夹: ${imageFolderPath}`);
+      } catch (err) {
+        logToFile(`清空图片文件夹时出错: ${err.message}`);
+        logToFile(`错误堆栈: ${err.stack}`);
+      }
+    } else {
+      // 创建images文件夹
+      logToFile(`图片目录不存在，准备创建`);
+      try {
+        fs.mkdirSync(imageFolderPath, { recursive: true });
+        logToFile(`创建图片文件夹成功: ${imageFolderPath}`);
+      } catch (err) {
+        logToFile(`创建图片文件夹时出错: ${err.message}`);
+        logToFile(`错误堆栈: ${err.stack}`);
+
+        // 尝试创建一个测试文件，检查写入权限
+        try {
+          const testFilePath = path.join(
+            wikiMcpDir,
+            "test_write_permission.txt"
+          );
+          fs.writeFileSync(testFilePath, "test");
+          logToFile(`测试文件创建成功: ${testFilePath}`);
+          fs.unlinkSync(testFilePath);
+        } catch (testErr) {
+          logToFile(`测试文件创建失败，可能是权限问题: ${testErr.message}`);
+        }
+
+        // 如果创建目录失败，尝试其他位置
+        try {
+          const altPath = path.join(process.cwd(), "images");
+          logToFile(`尝试在当前工作目录创建images文件夹: ${altPath}`);
+          fs.mkdirSync(altPath, { recursive: true });
+          logToFile(`在当前工作目录创建images文件夹成功: ${altPath}`);
+          return { imageMap: new Map(), imageFolderPath: altPath };
+        } catch (altErr) {
+          logToFile(`在当前工作目录创建images文件夹失败: ${altErr.message}`);
+        }
+      }
     }
-
-    if (!fs.existsSync(imageFolderPath)) {
-      fs.mkdirSync(imageFolderPath, { recursive: true });
-    }
-
-    logToFile(`创建图片存放文件夹: ${imageFolderPath}`);
 
     // 使用提取图片的功能获取所有图片信息
     const imageInfos = extractImagesFromHtml(extractedContent.dom);
@@ -73,27 +113,41 @@ export async function downloadImagesFromHtml(
 
       if (!src || src.startsWith("data:")) {
         // 跳过空路径或base64编码的图片
+        logToFile(
+          `跳过图片 #${i}: ${
+            src ? src.substring(0, 30) + "..." : "empty"
+          } (data URI或空路径)`
+        );
         continue;
       }
+
+      logToFile(`准备下载图片 #${i}: ${src.substring(0, 50)}...`);
 
       imagePromises.push(
         downloadImage(src, imageFolderPath, i, baseUrl, headers, inTable)
           .then(({ success, originalUrl, localPath, inTable }) => {
             if (success) {
-              // 存储原始URL到本地相对路径的映射
-              const relativePath = `./WikiImages/${imageFolderName}/${path.basename(
-                localPath
-              )}`;
+              // 固定使用./images/文件名作为相对路径
+              const fileName = path.basename(localPath);
+              const relativePath = `./images/${fileName}`;
               imageMap.set(originalUrl, relativePath);
               logToFile(
-                `已下载图片: ${originalUrl} -> ${relativePath}${
-                  inTable ? " (表格中)" : ""
-                }`
+                `已下载图片 #${i}: ${originalUrl.substring(
+                  0,
+                  30
+                )}... -> ${relativePath}${inTable ? " (表格中)" : ""}`
               );
+            } else {
+              logToFile(`图片 #${i} 下载失败: ${src.substring(0, 50)}...`);
             }
           })
           .catch((error) => {
-            logToFile(`下载图片失败 ${src}: ${error.message}`);
+            logToFile(
+              `下载图片 #${i} 时出错 ${src.substring(0, 30)}...: ${
+                error.message
+              }`
+            );
+            logToFile(`错误堆栈: ${error.stack}`);
           })
       );
     }
@@ -101,9 +155,15 @@ export async function downloadImagesFromHtml(
     // 等待所有图片下载完成
     await Promise.all(imagePromises);
 
+    logToFile(
+      `图片下载完成，共下载 ${imageMap.size} 张图片到 ${imageFolderPath}`
+    );
+    logToFile(`======图片下载结束======`);
+
     return { imageMap, imageFolderPath };
   } catch (error) {
     logToFile(`处理图片时出错: ${error.message}`);
+    logToFile(`错误堆栈: ${error.stack}`);
     return { imageMap: new Map(), imageFolderPath: null };
   }
 }
@@ -144,73 +204,121 @@ async function downloadImage(
       fullUrl = `https:${url}`;
     }
 
-    logToFile(`下载图片: ${fullUrl}${inTable ? " (表格中)" : ""}`);
+    logToFile(
+      `下载图片 #${index}: 转换URL ${url} -> ${fullUrl}${
+        inTable ? " (表格中)" : ""
+      }`
+    );
 
     // 获取图片
-    const response = await axios.get(fullUrl, {
-      responseType: "arraybuffer",
-      headers,
-      timeout: 10000, // 10秒超时
-      maxRedirects: 5,
-    });
-
-    // 确定文件扩展名
-    const contentType = response.headers["content-type"];
-    let extension = ".png"; // 默认扩展名
-
-    if (contentType) {
-      if (contentType.includes("jpeg") || contentType.includes("jpg")) {
-        extension = ".jpg";
-      } else if (contentType.includes("png")) {
-        extension = ".png";
-      } else if (contentType.includes("gif")) {
-        extension = ".gif";
-      } else if (contentType.includes("svg")) {
-        extension = ".svg";
-      } else if (contentType.includes("webp")) {
-        extension = ".webp";
-      }
-    } else {
-      // 从URL中尝试获取扩展名
-      const urlExt = path.extname(new URL(fullUrl).pathname).toLowerCase();
-      if (
-        urlExt &&
-        [".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp"].includes(urlExt)
-      ) {
-        extension = urlExt;
-      }
-    }
-
-    // 生成文件名 - 使用索引和原始文件名的组合
-    let originalFileName;
     try {
-      originalFileName = path.basename(new URL(fullUrl).pathname);
-      // 如果原始文件名太长或包含奇怪字符，使用索引作为文件名
-      if (
-        originalFileName.length > 50 ||
-        !/^[a-zA-Z0-9._-]+$/.test(originalFileName)
-      ) {
-        originalFileName = `image_${index}${extension}`;
+      logToFile(`发起请求: ${fullUrl.substring(0, 100)}...`);
+      const response = await axios.get(fullUrl, {
+        responseType: "arraybuffer",
+        headers,
+        timeout: 30000, // 增加超时时间到30秒
+        maxRedirects: 5,
+      });
+
+      logToFile(
+        `请求成功，状态码: ${response.status}, 数据大小: ${response.data.length} 字节`
+      );
+
+      // 确定文件扩展名
+      const contentType = response.headers["content-type"];
+      let extension = ".png"; // 默认扩展名
+
+      if (contentType) {
+        logToFile(`Content-Type: ${contentType}`);
+        if (contentType.includes("jpeg") || contentType.includes("jpg")) {
+          extension = ".jpg";
+        } else if (contentType.includes("png")) {
+          extension = ".png";
+        } else if (contentType.includes("gif")) {
+          extension = ".gif";
+        } else if (contentType.includes("svg")) {
+          extension = ".svg";
+        } else if (contentType.includes("webp")) {
+          extension = ".webp";
+        }
+      } else {
+        // 从URL中尝试获取扩展名
+        try {
+          const urlExt = path.extname(new URL(fullUrl).pathname).toLowerCase();
+          logToFile(`从URL路径提取的扩展名: ${urlExt}`);
+          if (
+            urlExt &&
+            [".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp"].includes(urlExt)
+          ) {
+            extension = urlExt;
+          }
+        } catch (err) {
+          logToFile(`从URL获取扩展名时出错: ${err.message}`);
+        }
       }
-    } catch (e) {
-      originalFileName = `image_${index}${extension}`;
+
+      // 简化文件名，只使用索引号
+      const tableIndicator = inTable ? "_table" : "";
+      const fileName = `img_${index}${tableIndicator}${extension}`;
+      const filePath = path.join(folderPath, fileName);
+
+      logToFile(`准备写入文件: ${filePath}`);
+
+      // 写入文件
+      try {
+        fs.writeFileSync(filePath, response.data);
+        logToFile(
+          `文件写入成功: ${filePath}, 大小: ${response.data.length} 字节`
+        );
+
+        // 验证文件是否成功写入
+        if (fs.existsSync(filePath)) {
+          const stats = fs.statSync(filePath);
+          logToFile(`文件验证: ${filePath} 存在, 大小: ${stats.size} 字节`);
+        } else {
+          logToFile(`警告: 文件写入后不存在: ${filePath}`);
+        }
+
+        return {
+          success: true,
+          originalUrl: url,
+          localPath: filePath,
+          inTable,
+        };
+      } catch (writeErr) {
+        logToFile(`写入文件时出错: ${writeErr.message}`);
+        logToFile(`错误堆栈: ${writeErr.stack}`);
+
+        // 尝试在系统临时目录写入
+        try {
+          const os = require("os");
+          const tmpDir = os.tmpdir();
+          const tmpFilePath = path.join(tmpDir, fileName);
+          logToFile(`尝试写入临时文件: ${tmpFilePath}`);
+          fs.writeFileSync(tmpFilePath, response.data);
+          logToFile(`临时文件写入成功: ${tmpFilePath}`);
+          return {
+            success: true,
+            originalUrl: url,
+            localPath: tmpFilePath,
+            inTable,
+          };
+        } catch (tmpErr) {
+          logToFile(`写入临时文件也失败: ${tmpErr.message}`);
+          return { success: false, originalUrl: url, localPath: null, inTable };
+        }
+      }
+    } catch (requestErr) {
+      logToFile(`图片请求失败: ${requestErr.message}`);
+      if (requestErr.response) {
+        logToFile(`响应状态: ${requestErr.response.status}`);
+        logToFile(`响应头: ${JSON.stringify(requestErr.response.headers)}`);
+      }
+      throw requestErr; // 重新抛出以便外层捕获
     }
-
-    // 添加表格标记以便于识别
-    const tableIndicator = inTable ? "_table" : "";
-
-    // 确保文件名安全且唯一
-    const fileName = `${index}${tableIndicator}_${sanitizeFilename(
-      originalFileName
-    )}`;
-    const filePath = path.join(folderPath, fileName);
-
-    // 写入文件
-    fs.writeFileSync(filePath, response.data);
-
-    return { success: true, originalUrl: url, localPath: filePath, inTable };
   } catch (error) {
-    logToFile(`下载图片失败 ${url}: ${error.message}`);
+    logToFile(`下载图片 #${index} 整体处理失败 ${url}: ${error.message}`);
+    logToFile(`错误堆栈: ${error.stack}`);
     return { success: false, originalUrl: url, localPath: null, inTable };
   }
 }
